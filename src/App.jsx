@@ -90,21 +90,42 @@ function App() {
   useEffect(() => {
     console.log('🔄 App Montando. URL:', window.location.href);
     
+    // Si hay un hash en la URL, es probable que estemos volviendo de Google
+    const carriesSession = window.location.hash && window.location.hash.includes('access_token');
+    
     supabase.auth.getSession().then(({ data: { session } }) => {
       console.log('📦 Sesión inicial:', session ? '✅ Existe' : '❌ Nula');
-      setSession(session)
-      setUser(session?.user || null)
-      setLoading(false)
+      if (session) {
+        setSession(session)
+        setUser(session.user)
+        setLoading(false)
+      } else if (!carriesSession) {
+        setLoading(false)
+      }
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       console.log('🔔 Evento Auth:', event, session ? '✅ Sesión Activa' : '❌ Sin Sesión');
-      setSession(session)
-      setUser(session?.user || null)
-      if (session) setLoading(false)
+      if (session) {
+        setSession(session)
+        setUser(session.user)
+        setLoading(false)
+      } else if (event === 'SIGNED_OUT') {
+        setSession(null)
+        setUser(null)
+        setLoading(false)
+      }
     })
 
-    return () => subscription.unsubscribe()
+    // Timeout de seguridad: Si pasan 5 segundos y seguimos en loading, mostramos algo
+    const timer = setTimeout(() => {
+      setLoading(false);
+    }, 5000);
+
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(timer);
+    }
   }, [])
 
   useEffect(() => {
