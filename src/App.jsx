@@ -117,8 +117,15 @@ function App() {
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       console.log('📦 Sesión inicial SDK:', session ? '✅ Existe' : '❌ Nula');
+      
+      let finalSession = session;
       if (session) {
-        console.log('🔑 Provider Token:', session.provider_token ? '✅ Presente' : '❌ Ausente');
+        if (session.provider_token) {
+          sessionStorage.setItem('google_token', session.provider_token);
+        } else {
+          const storedToken = sessionStorage.getItem('google_token');
+          if (storedToken) session.provider_token = storedToken;
+        }
         setSession(session)
         setUser(session.user)
         setLoading(false)
@@ -129,12 +136,19 @@ function App() {
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       console.log('🔔 Evento Auth:', event, session ? '✅ Sesión Activa' : '❌ Sin Sesión');
+      
       if (session) {
-        console.log('🔑 Provider Token (Event):', session.provider_token ? '✅ Presente' : '❌ Ausente');
+        if (session.provider_token) {
+          sessionStorage.setItem('google_token', session.provider_token);
+        } else {
+          const storedToken = sessionStorage.getItem('google_token');
+          if (storedToken) session.provider_token = storedToken;
+        }
         setSession(session)
         setUser(session.user)
         setLoading(false)
       } else if (event === 'SIGNED_OUT') {
+        sessionStorage.removeItem('google_token');
         setSession(null)
         setUser(null)
         setLoading(false)
