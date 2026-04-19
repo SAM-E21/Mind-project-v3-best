@@ -89,6 +89,10 @@ function App() {
 
   useEffect(() => {
     console.log('🔄 App Montando. URL:', window.location.href);
+    console.log('🔗 Supabase Config:', { 
+      url: import.meta.env.VITE_SUPABASE_URL ? '✅ Definida' : '❌ UNDEFINED',
+      key: import.meta.env.VITE_SUPABASE_ANON_KEY ? '✅ Definida' : '❌ UNDEFINED'
+    });
     
     // Si hay un hash en la URL, es probable que estemos volviendo de Google
     const carriesSession = window.location.hash && window.location.hash.includes('access_token');
