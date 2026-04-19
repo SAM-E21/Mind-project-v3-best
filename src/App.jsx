@@ -88,15 +88,20 @@ function App() {
   }, [user, masterPassword])
 
   useEffect(() => {
+    console.log('🔄 App Montando. URL:', window.location.href);
+    
     supabase.auth.getSession().then(({ data: { session } }) => {
+      console.log('📦 Sesión inicial:', session ? '✅ Existe' : '❌ Nula');
       setSession(session)
       setUser(session?.user || null)
       setLoading(false)
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log('🔔 Evento Auth:', event, session ? '✅ Sesión Activa' : '❌ Sin Sesión');
       setSession(session)
       setUser(session?.user || null)
+      if (session) setLoading(false)
     })
 
     return () => subscription.unsubscribe()
