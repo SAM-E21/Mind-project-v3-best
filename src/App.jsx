@@ -91,14 +91,32 @@ function App() {
     console.log('🔄 App Montando. URL:', window.location.href);
     console.log('🔗 Supabase Config:', { 
       url: import.meta.env.VITE_SUPABASE_URL ? '✅ Definida' : '❌ UNDEFINED',
-      key: import.meta.env.VITE_SUPABASE_ANON_KEY ? '✅ Definida' : '❌ UNDEFINED'
+      key_prefix: import.meta.env.VITE_SUPABASE_ANON_KEY ? import.meta.env.VITE_SUPABASE_ANON_KEY.substring(0, 8) + '...' : '❌ UNDEFINED'
     });
     
     // Si hay un hash en la URL, es probable que estemos volviendo de Google
     const carriesSession = window.location.hash && window.location.hash.includes('access_token');
     
+    if (carriesSession) {
+      console.log('⚡ Detectado token en URL. Intentando captura manual...');
+      const params = new URLSearchParams(window.location.hash.substring(1));
+      const access_token = params.get('access_token');
+      const refresh_token = params.get('refresh_token');
+      if (access_token && refresh_token) {
+        supabase.auth.setSession({ access_token, refresh_token }).then(({ data, error }) => {
+          if (error) console.error('❌ Error en setSession manual:', error);
+          else if (data.session) {
+            console.log('✅ Sesión manual establecida');
+            setSession(data.session);
+            setUser(data.session.user);
+            setLoading(false);
+          }
+        });
+      }
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
-      console.log('📦 Sesión inicial:', session ? '✅ Existe' : '❌ Nula');
+      console.log('📦 Sesión inicial SDK:', session ? '✅ Existe' : '❌ Nula');
       if (session) {
         setSession(session)
         setUser(session.user)
