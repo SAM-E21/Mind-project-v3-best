@@ -270,63 +270,67 @@ function App() {
   }
 
   const handleUpload = async (e) => {
-    const file = e.target.files[0]
-    if (!file) return
+    const selectedFiles = Array.from(e.target.files)
+    if (selectedFiles.length === 0) return
     if (!session?.provider_token) return alert('Inicia sesión con Google para usar el Drive');
 
-    const customTitle = prompt('Nombre del archivo:', file.name)
-    if (!customTitle) return
+    if (!masterPassword) {
+      const pass = prompt('Clave Maestra requerida para encriptar:')
+      if (!pass) return
+      setMasterPassword(pass)
+    }
 
     setUploading(true)
+    let successCount = 0;
+    
     try {
-      if (!masterPassword) {
-        const pass = prompt('Clave Maestra requerida para encriptar:')
-        if (!pass) return
-        setMasterPassword(pass)
+      for (const file of selectedFiles) {
+        console.log(`🔐 Procesando (${successCount + 1}/${selectedFiles.length}): ${file.name}`);
+        
+        // 1. Encriptar
+        const buffer = await file.arrayBuffer();
+        const encryptedData = await encryptFile(buffer, masterPassword);
+
+        // 2. Subir a Google Drive
+        const metadata = {
+          name: `vault_${Date.now()}_${file.name}.enc`,
+          mimeType: 'application/octet-stream'
+        };
+
+        const formData = new FormData();
+        formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+        formData.append('file', new Blob([encryptedData], { type: 'application/octet-stream' }));
+
+        const driveResp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${session.provider_token}` },
+          body: formData
+        });
+        
+        const driveData = await driveResp.json();
+        if (!driveData.id) throw new Error(`Google Drive upload failed for ${file.name}`);
+
+        // 3. Registrar en Supabase
+        const { error: dbError } = await supabase
+          .from('files')
+          .insert({
+            folder_id: currentFolderId,
+            name: file.name,
+            storage_path: driveData.id,
+            type: file.type.startsWith('video') ? 'video' : 'image',
+            mime_type: file.type,
+            user_id: user.id
+          });
+
+        if (dbError) throw dbError;
+        successCount++;
       }
       
-      // 1. Encriptar
-      console.log('🔐 Encriptando...');
-      const buffer = await file.arrayBuffer();
-      const encryptedData = await encryptFile(buffer, masterPassword || pass);
-
-      // 2. Subir a Google Drive
-      const metadata = {
-        name: `vault_${Date.now()}_${file.name}.enc`,
-        mimeType: 'application/octet-stream'
-      };
-
-      const formData = new FormData();
-      formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-      formData.append('file', new Blob([encryptedData], { type: 'application/octet-stream' }));
-
-      const driveResp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${session.provider_token}` },
-        body: formData
-      });
-      
-      const driveData = await driveResp.json();
-      if (!driveData.id) throw new Error('Google Drive upload failed');
-
-      // 3. Registrar en Supabase
-      const { error: dbError } = await supabase
-        .from('files')
-        .insert({
-          folder_id: currentFolderId,
-          name: customTitle,
-          storage_path: driveData.id,
-          type: file.type.startsWith('video') ? 'video' : 'image',
-          mime_type: file.type,
-          user_id: user.id
-        });
-
-      if (dbError) throw dbError;
-      
-      alert('¡Encriptado y guardado en Drive con éxito!');
+      alert(`¡Éxito! Se han encriptado y subido ${successCount} archivos.`);
       fetchFiles();
     } catch (err) {
-      alert('Error: ' + err.message);
+      console.error(err);
+      alert(`Error tras subir ${successCount} archivos: ` + err.message);
     } finally {
       setUploading(false)
     }
@@ -426,7 +430,7 @@ function App() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <label className="glow-btn" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', cursor: 'pointer', opacity: uploading ? 0.7 : 1 }}>
             <Upload size={18} /> {uploading ? 'Encriptando...' : 'Subir a Drive'}
-            <input type="file" onChange={handleUpload} style={{ display: 'none' }} disabled={uploading} />
+            <input type="file" onChange={handleUpload} style={{ display: 'none' }} disabled={uploading} multiple />
           </label>
           <div className="category-item" onClick={handleLogout} style={{ cursor: 'pointer' }}>
             <LogOut size={18} /> Cerrar Bóveda
