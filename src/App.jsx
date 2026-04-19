@@ -5,6 +5,9 @@ import { encryptFile, decryptFile } from './cryptoUtils'
 import EnhancedVideoPlayer from './EnhancedVideoPlayer'
 import Login from './Login'
 
+// Cache global en memoria para archivos ya desencriptados
+const mediaCache = {};
+
 function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }) {
   const [url, setUrl] = useState(null)
   const [decrypting, setDecrypting] = useState(true)
@@ -31,6 +34,10 @@ function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }
         console.log('✅ Desencriptado con éxito!');
         const blob = new Blob([decryptedBuffer], { type: file.mime_type || 'image/jpeg' });
         const localUrl = URL.createObjectURL(blob);
+        
+        // Guardar en caché
+        mediaCache[file.storage_path] = localUrl;
+        
         setUrl(localUrl);
       } catch (err) {
         console.error('💥 Error crítico en MediaItem:', err);
@@ -327,6 +334,9 @@ function App() {
   }
 
   const handleLogout = async () => {
+    // Limpiar caché al salir por seguridad
+    Object.values(mediaCache).forEach(url => URL.revokeObjectURL(url));
+    Object.keys(mediaCache).forEach(key => delete mediaCache[key]);
     await supabase.auth.signOut()
   }
 
