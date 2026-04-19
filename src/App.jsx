@@ -13,10 +13,27 @@ function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }
   const [decrypting, setDecrypting] = useState(true)
 
   useEffect(() => {
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+        load();
+        observer.disconnect();
+      }
+    }, { threshold: 0.1 });
+
+    const el = document.getElementById(`media-${file.id}`);
+    if (el) observer.observe(el);
+
     async function load() {
       try {
         if (!session?.provider_token) return;
         
+        // 1. Revisar caché
+        if (mediaCache[file.storage_path]) {
+          setUrl(mediaCache[file.storage_path]);
+          setDecrypting(false);
+          return;
+        }
+
         console.log('📦 Descargando de Drive...', file.storage_path);
         const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${file.storage_path}?alt=media`, {
           headers: { Authorization: `Bearer ${session.provider_token}` }
@@ -35,9 +52,7 @@ function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }
         const blob = new Blob([decryptedBuffer], { type: file.mime_type || 'image/jpeg' });
         const localUrl = URL.createObjectURL(blob);
         
-        // Guardar en caché
         mediaCache[file.storage_path] = localUrl;
-        
         setUrl(localUrl);
       } catch (err) {
         console.error('💥 Error crítico en MediaItem:', err);
@@ -45,11 +60,12 @@ function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }
         setDecrypting(false);
       }
     }
-    load();
+
+    return () => observer.disconnect();
   }, [file.storage_path, session, masterPassword]);
 
   return (
-    <div className="media-card glass" onClick={() => (url && onSelect({ ...file, url }))} style={{ cursor: 'pointer' }}>
+    <div id={`media-${file.id}`} className="media-card glass" onClick={() => (url && onSelect({ ...file, url }))} style={{ cursor: 'pointer' }}>
       {decrypting ? (
         <div style={{ height: '200px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
           <Loader2 className="animate-spin" size={24} />
