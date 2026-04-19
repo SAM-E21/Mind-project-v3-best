@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Folder, Image as ImageIcon, Video, Tag, Calendar, Upload, Settings, LogOut, ChevronRight, Loader2 } from 'lucide-react'
+import { Folder, Image as ImageIcon, Video, Tag, Calendar, Upload, Settings, LogOut, ChevronRight, Loader2, Menu, X } from 'lucide-react'
 import { supabase } from './supabase'
 import { encryptFile, decryptFile } from './cryptoUtils'
 import EnhancedVideoPlayer from './EnhancedVideoPlayer'
@@ -78,6 +78,7 @@ function App() {
   const [newFolderName, setNewFolderName] = useState('')
   const [masterPassword, setMasterPassword] = useState('')
   const [selectedFile, setSelectedFile] = useState(null)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
 
   useEffect(() => {
     // Si no hay clave, pedirla nada más entrar
@@ -334,7 +335,19 @@ function App() {
 
   return (
     <div className="app-container">
-      <aside className="sidebar glass">
+      {/* Mobile Toggle */}
+      <button 
+        className="mobile-nav-toggle glass" 
+        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+        style={{ border: 'none', color: 'white', cursor: 'pointer' }}
+      >
+        {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
+      </button>
+
+      {/* Sidebar Overlay for Mobile */}
+      {isSidebarOpen && <div className="sidebar-overlay" onClick={() => setIsSidebarOpen(false)}></div>}
+
+      <aside className={`sidebar glass ${isSidebarOpen ? 'open' : ''}`}>
         <div style={{ padding: '0 10px', marginBottom: '20px' }}>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Vault.</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.6rem', color: masterPassword ? '#4ade80' : '#ff4444' }}>
@@ -345,7 +358,7 @@ function App() {
         <nav style={{ flex: 1, overflowY: 'auto' }}>
           <div style={{ color: 'var(--text-dim)', fontSize: '0.75rem', fontWeight: 600, padding: '0 16px 8px', textTransform: 'uppercase' }}>Secciones</div>
           {folders.map(cat => (
-            <div key={cat.id} className={`category-item ${activeTab === cat.name ? 'active' : ''}`} onClick={() => setActiveTab(cat.name)} style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div className={`category-item ${activeTab === cat.name ? 'active' : ''}`} onClick={() => { setActiveTab(cat.name); setIsSidebarOpen(false); }} style={{ display: 'flex', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <Folder size={18} />
                 <span style={{ textTransform: 'capitalize' }}>{cat.name}</span>
