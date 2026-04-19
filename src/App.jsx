@@ -4,6 +4,7 @@ import { supabase } from './supabase'
 import { encryptFile, decryptFile } from './cryptoUtils'
 import EnhancedVideoPlayer from './EnhancedVideoPlayer'
 import Login from './Login'
+import { getCachedMedia, setCachedMedia, clearVaultCache } from './cacheUtils'
 
 // Cache global en memoria para archivos ya desencriptados
 const mediaCache = {};
@@ -27,9 +28,21 @@ function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }
       try {
         if (!session?.provider_token) return;
         
-        // 1. Revisar caché
+        // 1. Revisar caché en memoria
         if (mediaCache[file.storage_path]) {
           setUrl(mediaCache[file.storage_path]);
+          setDecrypting(false);
+          return;
+        }
+
+        // 2. Revisar caché persistente (IndexedDB)
+        console.log('🔍 Buscando en caché local persistente...', file.name);
+        const cachedBlob = await getCachedMedia(file.storage_path);
+        if (cachedBlob) {
+          console.log('✨ Encontrado en caché persistente!');
+          const localUrl = URL.createObjectURL(cachedBlob);
+          mediaCache[file.storage_path] = localUrl;
+          setUrl(localUrl);
           setDecrypting(false);
           return;
         }
@@ -52,7 +65,10 @@ function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }
         const blob = new Blob([decryptedBuffer], { type: file.mime_type || 'image/jpeg' });
         const localUrl = URL.createObjectURL(blob);
         
+        // Guardar en ambos cachés
         mediaCache[file.storage_path] = localUrl;
+        await setCachedMedia(file.storage_path, blob);
+        
         setUrl(localUrl);
       } catch (err) {
         console.error('💥 Error crítico en MediaItem:', err);
@@ -350,7 +366,10 @@ function App() {
   }
 
   const handleLogout = async () => {
-    // Limpiar caché al salir por seguridad
+    if (confirm('¿Deseas borrar también el caché local persistente por seguridad? (Si no, las fotos cargarán más rápido la próxima vez)')) {
+      await clearVaultCache();
+    }
+    // Limpiar caché de sesión
     Object.values(mediaCache).forEach(url => URL.revokeObjectURL(url));
     Object.keys(mediaCache).forEach(key => delete mediaCache[key]);
     await supabase.auth.signOut()
