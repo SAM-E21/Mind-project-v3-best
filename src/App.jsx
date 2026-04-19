@@ -118,6 +118,7 @@ function App() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       console.log('📦 Sesión inicial SDK:', session ? '✅ Existe' : '❌ Nula');
       if (session) {
+        console.log('🔑 Provider Token:', session.provider_token ? '✅ Presente' : '❌ Ausente');
         setSession(session)
         setUser(session.user)
         setLoading(false)
@@ -129,6 +130,7 @@ function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       console.log('🔔 Evento Auth:', event, session ? '✅ Sesión Activa' : '❌ Sin Sesión');
       if (session) {
+        console.log('🔑 Provider Token (Event):', session.provider_token ? '✅ Presente' : '❌ Ausente');
         setSession(session)
         setUser(session.user)
         setLoading(false)
