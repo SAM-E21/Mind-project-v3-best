@@ -12,7 +12,7 @@ const COMPRESSED_DIR = path.join(BASE_DIR, 'compressed');
 
 // Credentials
 const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const USER_ID = process.env.VITE_USER_ID;
 
 const s3Client = new S3Client({

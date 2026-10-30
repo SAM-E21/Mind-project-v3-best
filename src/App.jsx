@@ -1,801 +1,740 @@
-import React, { useState, useEffect } from 'react'
-import { Folder, Image as ImageIcon, Video, Tag, Calendar, Upload, Settings, LogOut, ChevronRight, Loader2, Menu, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Archive, Bot, CalendarDays, Check, CheckCheck, ChevronDown, CircleHelp, Download, FileKey2, FilePlus2, Film, Image as ImageIcon, KeyRound, ListTodo, LogOut, Menu, Pencil, Plus, Search, ShieldCheck, Star, Tag, Trash2, Upload, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { supabase } from './supabase'
-import { encryptFile, decryptFile, hashPassword, warmKey } from './cryptoUtils'
-import EnhancedVideoPlayer from './EnhancedVideoPlayer'
 import Login from './Login'
-import { getCachedMedia, setCachedMedia, clearVaultCache } from './cacheUtils'
+import EnhancedVideoPlayer from './EnhancedVideoPlayer'
+import VaultChat from './VaultChat'
+import { decryptBytes, deriveVaultKey, encryptBytes, exportKeyFile, fromBase64, generateUnlockSecret, readKeyFile, readNfcSecret, toBase64, writeNfcSecret } from './cryptoUtils'
 
-// Cache global en memoria para archivos ya desencriptados
-const mediaCache = {};
+const DEFAULT_CATEGORIES = ['Personal', 'Trabajo', 'Ideas']
 
-// Datos de señuelo (paisajes, memes, recetas) para la Bóveda de Señuelo
-const DECOY_FOLDERS = [
-  { id: 'decoy-paisajes', name: 'paisajes', display_order: 1 },
-  { id: 'decoy-memes', name: 'memes', display_order: 2 },
-  { id: 'decoy-recetas', name: 'recetas', display_order: 3 }
-];
+function saveKeyFile(secret) {
+  const url = URL.createObjectURL(exportKeyFile(secret))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'mi-clave.csdk'
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 
-const DECOY_FILES = [
-  // Paisajes
-  {
-    id: 'decoy-f1',
-    folder_id: 'decoy-paisajes',
-    name: 'Atardecer en la montaña.jpg',
-    type: 'image',
-    mime_type: 'image/jpeg',
-    url: 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1200&q=80',
-    storage_path: 'mock-drive-1',
-    created_at: new Date(Date.now() - 3600000 * 24 * 3).toISOString()
-  },
-  {
-    id: 'decoy-f2',
-    folder_id: 'decoy-paisajes',
-    name: 'Lago Espejo.jpg',
-    type: 'image',
-    mime_type: 'image/jpeg',
-    url: 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?auto=format&fit=crop&w=1200&q=80',
-    storage_path: 'mock-drive-2',
-    created_at: new Date(Date.now() - 3600000 * 24 * 2).toISOString()
-  },
-  {
-    id: 'decoy-v1',
-    folder_id: 'decoy-paisajes',
-    name: 'Rio Silencioso.mp4',
-    type: 'video',
-    mime_type: 'video/mp4',
-    url: 'https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4',
-    storage_path: 'mock-drive-v1',
-    created_at: new Date(Date.now() - 3600000 * 24).toISOString()
-  },
-  // Memes
-  {
-    id: 'decoy-f3',
-    folder_id: 'decoy-memes',
-    name: 'Gato programador gracioso.jpg',
-    type: 'image',
-    mime_type: 'image/jpeg',
-    url: 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?auto=format&fit=crop&w=1200&q=80',
-    storage_path: 'mock-drive-3',
-    created_at: new Date(Date.now() - 3600000 * 12).toISOString()
-  },
-  {
-    id: 'decoy-f4',
-    folder_id: 'decoy-memes',
-    name: 'Trabajando duro.jpg',
-    type: 'image',
-    mime_type: 'image/jpeg',
-    url: 'https://images.unsplash.com/photo-1531427186611-ecfd6d936c79?auto=format&fit=crop&w=1200&q=80',
-    storage_path: 'mock-drive-4',
-    created_at: new Date(Date.now() - 3600000 * 4).toISOString()
-  },
-  // Recetas
-  {
-    id: 'decoy-f5',
-    folder_id: 'decoy-recetas',
-    name: 'Panqueques perfectos.jpg',
-    type: 'image',
-    mime_type: 'image/jpeg',
-    url: 'https://images.unsplash.com/photo-1528207776546-365bb710ee93?auto=format&fit=crop&w=1200&q=80',
-    storage_path: 'mock-drive-5',
-    created_at: new Date(Date.now() - 3600000 * 8).toISOString()
+async function encodeVaultPhotoForChat(item, key) {
+  const { data, error: downloadError } = await supabase.storage.from('vault').download(item.storage_path)
+  if (downloadError) throw downloadError
+  const plaintext = await decryptBytes(await data.arrayBuffer(), key)
+  const bitmap = await createImageBitmap(new Blob([plaintext], { type: item.type }))
+  try {
+    const scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('No se pudo preparar la foto para el chat.')
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    const jpeg = await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('No se pudo preparar la foto.')), 'image/jpeg', 0.78))
+    const bytes = new Uint8Array(await jpeg.arrayBuffer())
+    let binary = ''
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+    }
+    return `data:image/jpeg;base64,${btoa(binary)}`
+  } finally {
+    bitmap.close()
   }
-];
+}
 
-function MediaItem({ file, session, masterPassword, onEdit, onDelete, onSelect }) {
-  const [url, setUrl] = useState(null)
-  const [decrypting, setDecrypting] = useState(true)
+function VaultThumbnail({ item, vaultKey, onOpen }) {
+  const [source, setSource] = useState(null)
+  const [failed, setFailed] = useState(false)
+  const video = item.type?.startsWith('video/')
 
   useEffect(() => {
-    // Si es un archivo de señuelo, tiene su url directa cargada de internet y no requiere desencriptado pesado
-    if (file.id && file.id.toString().startsWith('decoy')) {
-      setUrl(file.url);
-      setDecrypting(false);
-      return;
-    }
-
-    const observer = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) {
-        load();
-        observer.disconnect();
-      }
-    }, { threshold: 0.1 });
-
-    const el = document.getElementById(`media-${file.id}`);
-    if (el) observer.observe(el);
+    let cancelled = false
+    let objectUrl = null
+    let started = false
+    const element = document.getElementById(`vault-thumb-${item.id}`)
 
     async function load() {
+      if (started) return
+      started = true
       try {
-        if (!session?.provider_token) return;
-
-        // 1. Revisar caché en memoria
-        if (mediaCache[file.storage_path]) {
-          setUrl(mediaCache[file.storage_path]);
-          setDecrypting(false);
-          return;
-        }
-
-        // 2. Revisar caché persistente (IndexedDB)
-        console.log('🔍 Buscando en caché local persistente...', file.name);
-        const cachedBlob = await getCachedMedia(file.storage_path);
-        if (cachedBlob) {
-          console.log('✨ Encontrado en caché persistente!');
-          const localUrl = URL.createObjectURL(cachedBlob);
-          mediaCache[file.storage_path] = localUrl;
-          setUrl(localUrl);
-          setDecrypting(false);
-          return;
-        }
-
-        console.log('📦 Descargando de Drive...', file.storage_path);
-        const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${file.storage_path}?alt=media`, {
-          headers: { Authorization: `Bearer ${session.provider_token}` }
-        });
-        if (!resp.ok) {
-          const errorText = await resp.text();
-          console.error('❌ Error Drive:', resp.status, errorText);
-          throw new Error('Drive error');
-        }
-
-        const encryptedBuffer = await resp.arrayBuffer();
-        console.log('🔐 Desencriptando...', file.name);
-        // Esto ahora corre en un Web Worker en segundo plano a 60 FPS
-        const decryptedBuffer = await decryptFile(encryptedBuffer, masterPassword);
-
-        console.log('✅ Desencriptado con éxito!');
-        const blob = new Blob([decryptedBuffer], { type: file.mime_type || 'image/jpeg' });
-        const localUrl = URL.createObjectURL(blob);
-
-        // Guardar en ambos cachés
-        mediaCache[file.storage_path] = localUrl;
-        await setCachedMedia(file.storage_path, blob);
-
-        setUrl(localUrl);
-      } catch (err) {
-        console.error('💥 Error crítico en MediaItem:', err);
-      } finally {
-        setDecrypting(false);
+        const { data, error: downloadError } = await supabase.storage.from('vault').download(item.storage_path)
+        if (downloadError) throw downloadError
+        const plaintext = await decryptBytes(await data.arrayBuffer(), vaultKey)
+        objectUrl = URL.createObjectURL(new Blob([plaintext], { type: item.type }))
+        if (!cancelled) setSource(objectUrl)
+      } catch {
+        if (!cancelled) setFailed(true)
       }
     }
 
-    return () => observer.disconnect();
-  }, [file.storage_path, session, masterPassword]);
+    if (element && 'IntersectionObserver' in window) {
+      const observer = new IntersectionObserver(entries => {
+        if (entries[0]?.isIntersecting) {
+          observer.disconnect()
+          load()
+        }
+      }, { rootMargin: '160px' })
+      observer.observe(element)
+      return () => {
+        cancelled = true
+        observer.disconnect()
+        if (objectUrl) URL.revokeObjectURL(objectUrl)
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [item.id, item.storage_path, item.type, vaultKey])
 
   return (
-    <div id={`media-${file.id}`} className="media-card glass" onClick={() => (url && onSelect({ ...file, url }))} style={{ cursor: 'pointer' }}>
-      {decrypting ? (
-        <div style={{ height: '200px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-          <Loader2 className="animate-spin" size={24} />
-          <span style={{ fontSize: '0.7rem' }}>Desencriptando...</span>
+    <button id={`vault-thumb-${item.id}`} className="vault-media-card" onClick={() => onOpen(item)} title={`Abrir ${item.name}`}>
+      {source && (video
+        ? <video src={source} muted playsInline preload="metadata" />
+        : <img src={source} alt={item.name} loading="lazy" />)}
+      {!source && <span className="vault-media-placeholder">{failed ? <Archive size={24} /> : video ? <Film size={25} /> : <ImageIcon size={25} />}</span>}
+      {video && <span className="media-kind"><Film size={12} /> VIDEO</span>}
+      <span className="vault-media-caption"><strong>{item.name}</strong><small>{item.category}</small></span>
+      {item.favorite && <Star className="media-favorite" size={15} fill="currentColor" />}
+    </button>
+  )
+}
+
+function VaultGallery({ items, photos, categories, vaultKey, secret, busy, error, previewItem, previewUrl, zoom, onZoom, onOpen, onUpload, onUpdate, onDownload, onDelete, onClosePreview, onWriteNfc, onLock, onLogout, search, onSearch, category, onCategory, favoritesOnly, onFavoritesOnly, onClearError, conversations, selectedConversationId, chatOpen, chatSending, chatError, onOpenChat, onCloseChat, onCreateChat, onSelectChat, onDeleteChat, onSendChat, onClearChatError }) {
+  const isVideo = previewItem?.type?.startsWith('video/')
+
+  useEffect(() => {
+    if (!previewItem) return undefined
+    const closeOnEscape = event => {
+      if (event.key === 'Escape') onClosePreview()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [previewItem, onClosePreview])
+
+  function renameItem(item) {
+    const name = window.prompt('Nuevo nombre', item.name)
+    if (name?.trim()) onUpdate(item, { name: name.trim() })
+  }
+
+  function categorizeItem(item) {
+    const categoryName = window.prompt('Categoría', item.category || 'Sin categoría')
+    if (categoryName?.trim()) onUpdate(item, { category: categoryName.trim() })
+  }
+
+  return (
+    <main className="vault-screen">
+      <header className="vault-topbar">
+        <div className="vault-brand"><span className="vault-brand-mark"><Archive size={18} /></span><span>ARCHIVO <i>PRIVADO</i></span></div>
+        <div className="vault-top-actions">
+          <button type="button" title="Descargar copia de acceso .csdk" onClick={() => saveKeyFile(secret)}><FileKey2 size={16} /><span>Clave .csdk</span></button>
+          <button type="button" title="Escribir clave en NFC" onClick={onWriteNfc}><Tag size={16} /><span>Grabar NFC</span></button>
+          <button type="button" title="Abrir chats con agentes" onClick={onOpenChat}><Bot size={16} /><span>Agentes</span></button>
+          <button type="button" className="vault-lock-button" title="Bloquear bóveda" onClick={onLock}><KeyRound size={16} /><span>Bloquear</span></button>
+          <button type="button" className="vault-icon-button" title="Cerrar sesión" onClick={onLogout}><LogOut size={17} /></button>
         </div>
-      ) : !url ? (
-        <div style={{ height: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ff4444' }}>⚠️ Error</div>
-      ) : (
-        file.type === 'video' ? <video src={url} /> : <img src={url} alt={file.name} loading="lazy" />
-      )}
-      <div className="card-overlay" style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '8px', background: 'linear-gradient(transparent, rgba(0,0,0,0.8))', display: 'flex', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: '0.75rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{file.name}</span>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <Settings size={14} onClick={(e) => { e.stopPropagation(); onEdit(file.id, file.name); }} style={{ cursor: 'pointer' }} />
-          <LogOut size={14} onClick={(e) => { e.stopPropagation(); onDelete(file.id); }} style={{ cursor: 'pointer', color: '#ef4444' }} />
+      </header>
+
+      {error && <div className="vault-notice">{error}<button type="button" title="Cerrar aviso" onClick={onClearError}><X size={15} /></button></div>}
+
+      <section className="vault-page-content">
+        <div className="vault-page-heading"><div><div className="vault-kicker"><span /> ESPACIO CIFRADO</div><h1>Fotos & videos<span>.</span></h1><p>Tus recuerdos, ordenados a tu manera.</p></div><div className="vault-count"><strong>{items.length}</strong><span>elementos</span></div></div>
+
+        <label className="vault-upload-zone"><span className="vault-upload-icon"><Upload size={19} /></span><span className="vault-upload-copy"><strong>{busy ? 'Procesando archivo…' : 'Añadir fotos o videos'}</strong><small>Se cifran antes de subirlos</small></span><span className="vault-upload-cta"><Plus size={16} /> Añadir</span><input type="file" accept="image/*,video/*" multiple onChange={onUpload} disabled={busy} /></label>
+
+        <div className="vault-gallery-toolbar">
+          <label className="vault-search"><Search size={16} /><input value={search} onChange={event => onSearch(event.target.value)} placeholder="Buscar por nombre" /></label>
+          <div className="vault-gallery-filters">
+            <label className="vault-category-filter"><Tag size={14} /><select value={category} onChange={event => onCategory(event.target.value)}><option value="Todas">Todas las categorías</option>{categories.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+            <button type="button" className={`vault-favorite-filter ${favoritesOnly ? 'selected' : ''}`} onClick={() => onFavoritesOnly(!favoritesOnly)}><Star size={15} fill={favoritesOnly ? 'currentColor' : 'none'} /> Favoritos</button>
+          </div>
         </div>
-      </div>
-    </div>
-  );
+
+        {items.length ? <div className="vault-gallery-grid">{items.map(item => <article className="vault-card" key={item.id}>
+          <VaultThumbnail item={item} vaultKey={vaultKey} onOpen={onOpen} />
+          <div className="vault-card-actions">
+            <button type="button" className={item.favorite ? 'is-favorite' : ''} title={item.favorite ? 'Quitar de favoritos' : 'Añadir a favoritos'} onClick={() => onUpdate(item, { favorite: !item.favorite })}><Star size={15} fill={item.favorite ? 'currentColor' : 'none'} /></button>
+            <button type="button" title="Renombrar" onClick={() => renameItem(item)}><Pencil size={15} /></button>
+            <button type="button" title="Cambiar categoría" onClick={() => categorizeItem(item)}><Tag size={15} /></button>
+            <button type="button" title="Descargar descifrado" onClick={() => onDownload(item)}><Download size={15} /></button>
+            <button type="button" className="vault-delete-action" title="Eliminar" onClick={() => onDelete(item)}><Trash2 size={15} /></button>
+          </div>
+        </article>)}</div> : <div className="vault-empty"><Archive size={30} /><h2>{search || category !== 'Todas' || favoritesOnly ? 'No hay coincidencias' : 'Tu archivo está vacío'}</h2><p>{search || category !== 'Todas' || favoritesOnly ? 'Ajusta los filtros o la búsqueda.' : 'Añade una foto o video para empezar.'}</p></div>}
+      </section>
+
+      {previewItem && previewUrl && <div className="vault-preview-backdrop" onClick={onClosePreview}>
+        <section className="vault-preview-window" role="dialog" aria-modal="true" aria-label={`Vista previa de ${previewItem.name}`} onClick={event => event.stopPropagation()}>
+          <header className="vault-preview-header"><div><strong>{previewItem.name}</strong><span>{previewItem.category}</span></div><div className="vault-preview-tools">{!isVideo && <><button type="button" title="Alejar" onClick={() => onZoom(value => Math.max(1, value - 0.25))} disabled={zoom <= 1}><ZoomOut size={17} /></button><span>{Math.round(zoom * 100)}%</span><button type="button" title="Acercar" onClick={() => onZoom(value => Math.min(4, value + 0.25))}><ZoomIn size={17} /></button><button type="button" title="Restablecer zoom" onClick={() => onZoom(1)}>1:1</button></>}<button type="button" title="Descargar" onClick={() => onDownload(previewItem)}><Download size={17} /></button><button type="button" title="Cerrar vista previa" onClick={onClosePreview}><X size={19} /></button></div></header>
+          {isVideo ? <EnhancedVideoPlayer src={previewUrl} /> : <div className="vault-image-stage" onWheel={event => { event.preventDefault(); onZoom(value => Math.max(1, Math.min(4, value + (event.deltaY < 0 ? 0.15 : -0.15)))) }}><img src={previewUrl} alt={previewItem.name} style={{ transform: `scale(${zoom})` }} /></div>}
+        </section>
+      </div>}
+      {chatOpen && <VaultChat
+        conversations={conversations}
+        photos={photos}
+        selectedId={selectedConversationId}
+        onSelect={onSelectChat}
+        onCreate={onCreateChat}
+        onDelete={onDeleteChat}
+        onSend={onSendChat}
+        sending={chatSending}
+        error={chatError}
+        onClearError={onClearChatError}
+        onClose={onCloseChat}
+      />}
+    </main>
+  )
 }
 
 function App() {
-  const [user, setUser] = useState(null)
   const [session, setSession] = useState(null)
-  const [files, setFiles] = useState([])
-  const [folders, setFolders] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState('fotos')
-  const [currentFolderId, setCurrentFolderId] = useState(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [uploading, setUploading] = useState(false)
-  const [showNewFolderModal, setShowNewFolderModal] = useState(false)
-  const [newFolderName, setNewFolderName] = useState('')
-  const [masterPassword, setMasterPassword] = useState('')
-  const [selectedFile, setSelectedFile] = useState(null)
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [view, setView] = useState('tasks')
+  const [mobileNav, setMobileNav] = useState(false)
+  const [tasks, setTasks] = useState([])
+  const [customCategories, setCustomCategories] = useState([])
+  const [filter, setFilter] = useState('Hoy')
+  const [categoryFilter, setCategoryFilter] = useState('Todas')
+  const [query, setQuery] = useState('')
+  const [taskTitle, setTaskTitle] = useState('')
+  const [taskCategory, setTaskCategory] = useState('Personal')
+  const [taskDate, setTaskDate] = useState('')
+  const [taskPriority, setTaskPriority] = useState('Normal')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [vaultConfig, setVaultConfig] = useState(null)
+  const [vaultUnlocked, setVaultUnlocked] = useState(false)
+  const [vaultKey, setVaultKey] = useState(null)
+  const [vaultSessionToken, setVaultSessionToken] = useState('')
+  const [unlockSecret, setUnlockSecret] = useState('')
+  const [setupSecret, setSetupSecret] = useState('')
+  const [vaultObjects, setVaultObjects] = useState([])
+  const [showVaultGate, setShowVaultGate] = useState(false)
+  const [vaultCategoryFilter, setVaultCategoryFilter] = useState('Todas')
+  const [vaultFavoritesOnly, setVaultFavoritesOnly] = useState(false)
+  const [vaultSearch, setVaultSearch] = useState('')
+  const [previewItem, setPreviewItem] = useState(null)
+  const [previewUrl, setPreviewUrl] = useState(null)
+  const [previewZoom, setPreviewZoom] = useState(1)
+  const [vaultConversations, setVaultConversations] = useState([])
+  const [selectedConversationId, setSelectedConversationId] = useState(null)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatSending, setChatSending] = useState(false)
+  const [chatError, setChatError] = useState('')
 
-  // Estado para el modo señuelo y claves alternativas
-  const [isDecoyMode, setIsDecoyMode] = useState(false)
-  const [decoyFolders, setDecoyFolders] = useState([])
-  const [decoyFiles, setDecoyFiles] = useState([])
-  const [showSettingsModal, setShowSettingsModal] = useState(false)
-  const [decoyPasswordInput, setDecoyPasswordInput] = useState('')
+  const user = session?.user
+  const categories = useMemo(() => [...new Set([...DEFAULT_CATEGORIES, ...customCategories, ...tasks.map(task => task.category).filter(Boolean)])], [customCategories, tasks])
+  const vaultCategories = useMemo(() => [...new Set(vaultObjects.map(item => item.category).filter(Boolean))].sort(), [vaultObjects])
+  const visibleVaultObjects = useMemo(() => vaultObjects.filter(item => {
+    const matchesText = item.name.toLowerCase().includes(vaultSearch.toLowerCase())
+    const matchesCategory = vaultCategoryFilter === 'Todas' || item.category === vaultCategoryFilter
+    return matchesText && matchesCategory && (!vaultFavoritesOnly || item.favorite)
+  }), [vaultObjects, vaultSearch, vaultCategoryFilter, vaultFavoritesOnly])
 
-  useEffect(() => {
-    // Si no hay clave, pedirla nada más entrar
-    async function checkPassword() {
-      if (user && !masterPassword) {
-        const pass = prompt('Introduce tu Clave Maestra para acceder a la bóveda encriptada:')
-        if (pass) {
-          // Comprobar Clave de Coacción (Señuelo)
-          const enteredHash = await hashPassword(pass);
-          const savedDecoyHash = localStorage.getItem('vault_decoy_hash');
-
-          if (savedDecoyHash && enteredHash === savedDecoyHash) {
-            console.log('⚠️ INICIANDO SESIÓN EN MODO SEÑUELO');
-            setIsDecoyMode(true);
-            setDecoyFolders(DECOY_FOLDERS);
-            setDecoyFiles(DECOY_FILES);
-            setFolders(DECOY_FOLDERS);
-            setActiveTab('paisajes');
-            setMasterPassword(pass);
-          } else {
-            console.log('🔐 INICIANDO SESIÓN REAL');
-            setIsDecoyMode(false);
-            setMasterPassword(pass);
-            // ⚡ Pre-calentar la clave PBKDF2 en el Worker AHORA,
-            // antes de que aparezca cualquier foto o video en pantalla.
-            // Así el primer descifrado será instantáneo en lugar de tardar 1-2 seg.
-            warmKey(pass).then(() => console.log('🔥 Clave pre-calentada en Worker'));
-          }
-        }
-      }
-    }
-    checkPassword();
-  }, [user, masterPassword])
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+  }, [previewUrl])
 
   useEffect(() => {
-    console.log('🔄 App Montando. URL:', window.location.href);
-    console.log('🔗 Supabase Config:', {
-      url: import.meta.env.VITE_SUPABASE_URL ? '✅ Definida' : '❌ UNDEFINED',
-      key_prefix: import.meta.env.VITE_SUPABASE_ANON_KEY ? import.meta.env.VITE_SUPABASE_ANON_KEY.substring(0, 8) + '...' : '❌ UNDEFINED'
-    });
-
-    // Si hay un hash en la URL, es probable que estemos volviendo de Google
-    const carriesSession = window.location.hash && window.location.hash.includes('access_token');
-
-    if (carriesSession) {
-      console.log('⚡ Detectado token en URL. Intentando captura manual...');
-      const params = new URLSearchParams(window.location.hash.substring(1));
-      const access_token = params.get('access_token');
-      const refresh_token = params.get('refresh_token');
-      if (access_token && refresh_token) {
-        supabase.auth.setSession({ access_token, refresh_token }).then(({ data, error }) => {
-          if (error) console.error('❌ Error en setSession manual:', error);
-          else if (data.session) {
-            console.log('✅ Sesión manual establecida');
-            setSession(data.session);
-            setUser(data.session.user);
-            setLoading(false);
-          }
-        });
-      }
+    if (!supabase) {
+      setAuthLoading(false)
+      return undefined
     }
-
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      console.log('📦 Sesión inicial SDK:', session ? '✅ Existe' : '❌ Nula');
-
-      let finalSession = session;
-      if (session) {
-        if (session.provider_token) {
-          sessionStorage.setItem('google_token', session.provider_token);
-        } else {
-          const storedToken = sessionStorage.getItem('google_token');
-          if (storedToken) session.provider_token = storedToken;
-        }
-        setSession(session)
-        setUser(session.user)
-        setLoading(false)
-      } else if (!carriesSession) {
-        setLoading(false)
-      }
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setAuthLoading(false)
+    }).catch(() => setAuthLoading(false))
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      if (!nextSession) clearVaultState()
+      setAuthLoading(false)
     })
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      console.log('🔔 Evento Auth:', event, session ? '✅ Sesión Activa' : '❌ Sin Sesión');
-
-      if (session) {
-        if (session.provider_token) {
-          sessionStorage.setItem('google_token', session.provider_token);
-        } else {
-          const storedToken = sessionStorage.getItem('google_token');
-          if (storedToken) session.provider_token = storedToken;
-        }
-        setSession(session)
-        setUser(session.user)
-        setLoading(false)
-      } else if (event === 'SIGNED_OUT') {
-        sessionStorage.removeItem('google_token');
-        setSession(null)
-        setUser(null)
-        setLoading(false)
-      }
-    })
-
-    // Timeout de seguridad: Si pasan 5 segundos y seguimos en loading, mostramos algo
-    const timer = setTimeout(() => {
-      setLoading(false);
-    }, 5000);
-
-    return () => {
-      subscription.unsubscribe();
-      clearTimeout(timer);
-    }
+    return () => subscription.unsubscribe()
   }, [])
 
   useEffect(() => {
-    if (user) {
-      fetchFolders()
-      updateCurrentFolder()
+    if (!user || !supabase) return
+    setError('')
+    Promise.all([
+      supabase.from('tasks').select('*').order('created_at', { ascending: false }),
+      supabase.from('vault_access').select('user_id').maybeSingle(),
+    ]).then(async ([taskResult, accessResult]) => {
+      if (taskResult.error) throw taskResult.error
+      if (accessResult.error) throw accessResult.error
+      setTasks(taskResult.data || [])
+      const allowed = Boolean(accessResult.data)
+      if (!allowed) return
+      const { data: config, error: configError } = await supabase.from('vault_config').select('salt').maybeSingle()
+      if (configError) throw configError
+      setVaultConfig(config)
+      setShowVaultGate(true)
+    }).catch(loadError => setError(loadError.message))
+  }, [user])
+
+  function clearVaultState() {
+    setVaultKey(null)
+    setVaultSessionToken('')
+    setVaultUnlocked(false)
+    setUnlockSecret('')
+    setSetupSecret('')
+    setVaultObjects([])
+    setVaultConfig(null)
+    setShowVaultGate(false)
+    setPreviewItem(null)
+    setPreviewUrl(null)
+    setVaultConversations([])
+    setSelectedConversationId(null)
+    setChatOpen(false)
+    setChatSending(false)
+    setChatError('')
+  }
+
+  async function addTask(event) {
+    event.preventDefault()
+    if (!taskTitle.trim() || !user) return
+    setBusy(true)
+    setError('')
+    const { data, error: insertError } = await supabase.from('tasks').insert({
+      user_id: user.id,
+      title: taskTitle.trim(),
+      category: taskCategory.trim() || 'Personal',
+      due_date: taskDate || null,
+      priority: taskPriority,
+    }).select().single()
+    if (insertError) setError(insertError.message)
+    else {
+      setTasks(current => [data, ...current])
+      setTaskTitle('')
+      setTaskDate('')
+      setTaskPriority('Normal')
     }
-  }, [user, activeTab, isDecoyMode, decoyFolders])
+    setBusy(false)
+  }
 
-  useEffect(() => {
-    if (user && currentFolderId) {
-      fetchFiles()
-    }
-  }, [user, currentFolderId, searchQuery, isDecoyMode, decoyFiles])
+  async function toggleTask(task) {
+    const { data, error: updateError } = await supabase.from('tasks').update({ completed: !task.completed }).eq('id', task.id).select().single()
+    if (updateError) setError(updateError.message)
+    else setTasks(current => current.map(item => item.id === task.id ? data : item))
+  }
 
-  const updateCurrentFolder = async () => {
-    if (isDecoyMode) {
-      const currentList = decoyFolders.length ? decoyFolders : DECOY_FOLDERS;
-      const found = currentList.find(f => f.name === activeTab);
-      if (found) {
-        setCurrentFolderId(found.id);
-      } else {
-        setCurrentFolderId(null);
-      }
-      return;
-    }
+  async function removeTask(taskId) {
+    const { error: deleteError } = await supabase.from('tasks').delete().eq('id', taskId)
+    if (deleteError) setError(deleteError.message)
+    else setTasks(current => current.filter(task => task.id !== taskId))
+  }
 
-    const { data } = await supabase
-      .from('folders')
-      .select('id')
-      .eq('name', activeTab)
-      .limit(1)
+  async function loadVaultObjects(key) {
+    const { data, error: listError } = await supabase.from('vault_objects').select('id, storage_path, metadata_cipher, created_at').order('created_at', { ascending: false })
+    if (listError) throw listError
+    const decrypted = await Promise.all((data || []).map(async item => {
+      const plaintext = await decryptBytes(fromBase64(item.metadata_cipher), key)
+      return { ...item, ...JSON.parse(new TextDecoder().decode(plaintext)) }
+    }))
+    setVaultObjects(decrypted)
+  }
 
-    if (data && data.length > 0) {
-      setCurrentFolderId(data[0].id)
-    } else {
-      setCurrentFolderId(null)
-      setFiles([])
+  async function loadVaultConversations(key) {
+    const { data, error: listError } = await supabase.from('vault_conversations').select('id, payload_cipher').order('updated_at', { ascending: false })
+    if (listError) throw listError
+    const decrypted = await Promise.all((data || []).map(async row => {
+      const plaintext = await decryptBytes(fromBase64(row.payload_cipher), key)
+      return JSON.parse(new TextDecoder().decode(plaintext))
+    }))
+    setVaultConversations(decrypted)
+    setSelectedConversationId(decrypted[0]?.id || null)
+  }
+
+  async function persistVaultConversation(conversation, key = vaultKey) {
+    const payloadCipher = toBase64(await encryptBytes(new TextEncoder().encode(JSON.stringify(conversation)), key))
+    const { error: saveError } = await supabase.from('vault_conversations').upsert({
+      id: conversation.id,
+      user_id: user.id,
+      payload_cipher: payloadCipher,
+      updated_at: new Date().toISOString(),
+    })
+    if (saveError) throw saveError
+  }
+
+  async function configureVault(secret) {
+    if (secret.length < 16) throw new Error('Usa una clave de al menos 16 caracteres; recomendamos generar una aleatoria.')
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const saltValue = toBase64(salt)
+    const { data, error: credentialError } = await supabase.functions.invoke('vault-credential', {
+      body: { action: 'register', secret, salt: saltValue },
+    })
+    if (credentialError) throw credentialError
+    if (!data?.valid || !data.salt || !data.vaultSession) throw new Error('No se pudo configurar la sesión de bóveda.')
+    const key = await deriveVaultKey(secret, fromBase64(data.salt))
+    setVaultConfig({ salt: data.salt })
+    setVaultKey(key)
+    setVaultSessionToken(data.vaultSession)
+    setUnlockSecret(secret)
+    setVaultUnlocked(true)
+    setView('vault')
+    setShowVaultGate(false)
+  }
+
+  async function unlockVault(secret) {
+    if (!vaultConfig) return configureVault(secret)
+    const { data, error: credentialError } = await supabase.functions.invoke('vault-credential', {
+      body: { action: 'verify', secret },
+    })
+    if (credentialError) throw credentialError
+    if (!data?.valid || !data.salt || !data.vaultSession) throw new Error('No se pudo crear la sesión de bóveda.')
+    const key = await deriveVaultKey(secret, fromBase64(data.salt))
+    setVaultKey(key)
+    setVaultSessionToken(data.vaultSession)
+    setUnlockSecret(secret)
+    setVaultUnlocked(true)
+    await Promise.all([loadVaultObjects(key), loadVaultConversations(key)])
+    setShowVaultGate(false)
+    setView('vault')
+  }
+
+  async function handleUnlockSubmit(event) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await unlockVault(setupSecret || unlockSecret)
+      setSetupSecret('')
+    } catch (unlockError) {
+      setError(unlockError.message)
+    } finally {
+      setBusy(false)
     }
   }
 
-  const fetchFolders = async () => {
-    if (isDecoyMode) {
-      const currentList = decoyFolders.length ? decoyFolders : DECOY_FOLDERS;
-      setFolders(currentList);
-      return;
+  async function unlockFromFile(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setBusy(true)
+    setError('')
+    try {
+      await unlockVault(await readKeyFile(file))
+    } catch (unlockError) {
+      setError(unlockError.message)
+    } finally {
+      setBusy(false)
     }
-
-    const { data } = await supabase
-      .from('folders')
-      .select('*')
-      .order('display_order', { ascending: true })
-    if (data) setFolders(data)
   }
 
-  const fetchFiles = async () => {
-    if (!currentFolderId) {
-      setFiles([])
+  async function unlockFromNfc() {
+    setBusy(true)
+    setError('')
+    try {
+      await unlockVault(await readNfcSecret())
+    } catch (unlockError) {
+      setError(unlockError.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function addVaultFiles(event) {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    if (!files.length || !vaultKey) return
+    const unsupported = files.find(file => !file.type.startsWith('image/') && !file.type.startsWith('video/'))
+    if (unsupported) {
+      setError(`${unsupported.name}: solo se admiten fotos y videos.`)
       return
     }
-    setLoading(true)
+    setBusy(true)
+    setError('')
     try {
-      if (isDecoyMode) {
-        // Simulamos una latencia de carga
-        setTimeout(() => {
-          const currentList = decoyFiles.length ? decoyFiles : DECOY_FILES;
-          let filtered = currentList.filter(f => f.folder_id === currentFolderId);
-          if (searchQuery) {
-            filtered = filtered.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()));
-          }
-          setFiles(filtered);
-          setLoading(false);
-        }, 200);
-        return;
+      for (const file of files) {
+        const id = crypto.randomUUID()
+        const storagePath = `${user.id}/${id}.bin`
+        const encrypted = await encryptBytes(await file.arrayBuffer(), vaultKey)
+        const { error: uploadError } = await supabase.storage.from('vault').upload(storagePath, new Blob([encrypted]), { contentType: 'application/octet-stream' })
+        if (uploadError) throw uploadError
+        const metadata = { name: file.name, type: file.type || 'application/octet-stream', category: 'Sin categoría', favorite: false, size: file.size }
+        const metadataCipher = toBase64(await encryptBytes(new TextEncoder().encode(JSON.stringify(metadata)), vaultKey))
+        const { error: rowError } = await supabase.from('vault_objects').insert({ id, user_id: user.id, storage_path: storagePath, metadata_cipher: metadataCipher })
+        if (rowError) {
+          await supabase.storage.from('vault').remove([storagePath])
+          throw rowError
+        }
       }
-
-      let query = supabase
-        .from('files')
-        .select('*')
-        .eq('folder_id', currentFolderId)
-        .order('created_at', { ascending: false })
-
-      if (searchQuery) {
-        query = query.ilike('name', `%${searchQuery}%`)
-      }
-
-      const { data, error } = await query
-      if (error) throw error
-      setFiles(data || [])
-    } catch (err) {
-      console.error('Error al cargar archivos:', err)
+      await loadVaultObjects(vaultKey)
+    } catch (uploadError) {
+      setError(uploadError.message)
     } finally {
-      if (!isDecoyMode) setLoading(false)
+      setBusy(false)
     }
   }
 
-  const handleUpload = async (e) => {
-    const selectedFiles = Array.from(e.target.files)
-    if (selectedFiles.length === 0) return
+  async function updateVaultMetadata(item, patch) {
+    const metadata = { name: item.name, type: item.type, category: item.category, favorite: item.favorite, size: item.size, ...patch }
+    const metadataCipher = toBase64(await encryptBytes(new TextEncoder().encode(JSON.stringify(metadata)), vaultKey))
+    const { error: updateError } = await supabase.from('vault_objects').update({ metadata_cipher: metadataCipher }).eq('id', item.id)
+    if (updateError) setError(updateError.message)
+    else setVaultObjects(current => current.map(value => value.id === item.id ? { ...value, ...metadata } : value))
+  }
 
-    // 1. Simulación total en modo Señuelo
-    if (isDecoyMode) {
-      setUploading(true)
-      let successCount = 0;
-      
-      // Simulamos la animación y carga de encriptación progresiva
-      await new Promise(resolve => setTimeout(resolve, 800 * selectedFiles.length));
-      
-      const newFiles = [...decoyFiles];
-      for (const file of selectedFiles) {
-        const localUrl = URL.createObjectURL(file);
-        newFiles.unshift({
-          id: `decoy-uploaded-${Date.now()}-${successCount}`,
-          folder_id: currentFolderId,
-          name: file.name,
-          type: file.type.startsWith('video') ? 'video' : 'image',
-          mime_type: file.type,
-          url: localUrl,
-          storage_path: `mock-drive-uploaded-${Date.now()}`,
-          created_at: new Date().toISOString()
-        });
-        successCount++;
-      }
-      
-      setDecoyFiles(newFiles);
-      setUploading(false);
-      alert(`¡Éxito! Se han encriptado y subido ${successCount} archivos (Modo Señuelo).`);
-      return;
-    }
-
-    if (!session?.provider_token) return alert('Inicia sesión con Google para usar el Drive');
-
-    if (!masterPassword) {
-      const pass = prompt('Clave Maestra requerida para encriptar:')
-      if (!pass) return
-      setMasterPassword(pass)
-    }
-
-    setUploading(true)
-    let successCount = 0;
-
+  async function downloadVaultObject(item) {
+    setBusy(true)
+    setError('')
     try {
-      for (const file of selectedFiles) {
-        console.log(`🔐 Procesando (${successCount + 1}/${selectedFiles.length}): ${file.name}`);
-
-        // 1. Encriptar
-        const buffer = await file.arrayBuffer();
-        // Esto ahora corre en un Web Worker en segundo plano sin congelar la UI
-        const encryptedData = await encryptFile(buffer, masterPassword);
-
-        // 2. Subir a Google Drive
-        const metadata = {
-          name: `vault_${Date.now()}_${file.name}.enc`,
-          mimeType: 'application/octet-stream'
-        };
-
-        const formData = new FormData();
-        formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-        formData.append('file', new Blob([encryptedData], { type: 'application/octet-stream' }));
-
-        const driveResp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${session.provider_token}` },
-          body: formData
-        });
-
-        const driveData = await driveResp.json();
-        if (!driveData.id) throw new Error(`Google Drive upload failed for ${file.name}`);
-
-        // 3. Registrar en Supabase
-        const { error: dbError } = await supabase
-          .from('files')
-          .insert({
-            folder_id: currentFolderId,
-            name: file.name,
-            storage_path: driveData.id,
-            type: file.type.startsWith('video') ? 'video' : 'image',
-            mime_type: file.type,
-            user_id: user.id
-          });
-
-        if (dbError) throw dbError;
-        successCount++;
-      }
-
-      alert(`¡Éxito! Se han encriptado y subido ${successCount} archivos.`);
-      fetchFiles();
-    } catch (err) {
-      console.error(err);
-      alert(`Error tras subir ${successCount} archivos: ` + err.message);
+      const { data, error: downloadError } = await supabase.storage.from('vault').download(item.storage_path)
+      if (downloadError) throw downloadError
+      const plaintext = await decryptBytes(await data.arrayBuffer(), vaultKey)
+      const url = URL.createObjectURL(new Blob([plaintext], { type: item.type }))
+      const link = document.createElement('a')
+      link.href = url
+      link.download = item.name
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (downloadError) {
+      setError(downloadError.message)
     } finally {
-      setUploading(false)
+      setBusy(false)
     }
   }
 
-  const editFileName = async (fileId, currentName) => {
-    if (isDecoyMode) {
-      const newName = prompt('Nuevo nombre:', currentName)
-      if (!newName || newName === currentName) return
-      setDecoyFiles(prev => prev.map(f => f.id === fileId ? { ...f, name: newName } : f));
-      return;
-    }
-
-    const newName = prompt('Nuevo nombre:', currentName)
-    if (!newName || newName === currentName) return
-    const { error } = await supabase.from('files').update({ name: newName }).eq('id', fileId)
-    if (!error) fetchFiles()
-  }
-
-  const deleteFile = async (fileId) => {
-    if (isDecoyMode) {
-      if (!confirm('¿Borrar archivo?')) return
-      setDecoyFiles(prev => prev.filter(f => f.id !== fileId));
-      return;
-    }
-
-    if (!confirm('¿Borrar archivo?')) return
-    const { error } = await supabase.from('files').delete().eq('id', fileId)
-    if (!error) fetchFiles()
-  }
-
-  const createFolder = async (e) => {
-    e.preventDefault()
-    if (!newFolderName.trim()) return
-
-    if (isDecoyMode) {
-      const newFolder = {
-        id: `decoy-folder-${Date.now()}`,
-        name: newFolderName.toLowerCase(),
-        display_order: decoyFolders.length + 1
-      };
-      const updated = [...decoyFolders, newFolder];
-      setDecoyFolders(updated);
-      setFolders(updated);
-      setNewFolderName('')
-      setShowNewFolderModal(false)
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from('folders')
-      .insert({ name: newFolderName, user_id: user.id, display_order: folders.length + 1 })
-      .select().single()
-    if (!error) {
-      setFolders([...folders, data])
-      setNewFolderName('')
-      setShowNewFolderModal(false)
+  async function openVaultPreview(item) {
+    setBusy(true)
+    setError('')
+    try {
+      const { data, error: downloadError } = await supabase.storage.from('vault').download(item.storage_path)
+      if (downloadError) throw downloadError
+      const plaintext = await decryptBytes(await data.arrayBuffer(), vaultKey)
+      const url = URL.createObjectURL(new Blob([plaintext], { type: item.type }))
+      setPreviewItem(item)
+      setPreviewUrl(url)
+      setPreviewZoom(1)
+    } catch (previewError) {
+      setError(previewError.message)
+    } finally {
+      setBusy(false)
     }
   }
 
-  const deleteFolder = async (id, name) => {
-    if (isDecoyMode) {
-      if (!confirm(`¿Borrar carpeta ${name}?`)) return
-      const updated = decoyFolders.filter(f => f.id !== id);
-      setDecoyFolders(updated);
-      setFolders(updated);
-      if (activeTab === name) {
-        setActiveTab(updated[0]?.name || '');
+  async function removeVaultObject(item) {
+    if (!window.confirm(`¿Eliminar ${item.name}?`)) return
+    const { error: removeError } = await supabase.storage.from('vault').remove([item.storage_path])
+    if (removeError) return setError(removeError.message)
+    const { error: rowError } = await supabase.from('vault_objects').delete().eq('id', item.id)
+    if (rowError) setError(rowError.message)
+    else setVaultObjects(current => current.filter(value => value.id !== item.id))
+  }
+
+  async function createVaultConversation(agent) {
+    const conversation = {
+      id: crypto.randomUUID(),
+      agent,
+      title: 'Nuevo chat',
+      messages: [],
+      updatedAt: new Date().toISOString(),
+    }
+    try {
+      await persistVaultConversation(conversation)
+      setVaultConversations(current => [conversation, ...current])
+      setSelectedConversationId(conversation.id)
+      setChatError('')
+    } catch (saveError) {
+      setChatError(saveError.message)
+    }
+  }
+
+  async function sendVaultMessage(text, photoId = '') {
+    if (!text.trim() || !vaultSessionToken || chatSending) return
+    const current = vaultConversations.find(item => item.id === selectedConversationId)
+    if (!current) {
+      setChatError('Crea o selecciona un chat antes de enviar mensajes.')
+      return
+    }
+    const photo = photoId ? vaultObjects.find(item => item.id === photoId && item.type?.startsWith('image/')) : null
+    if (photoId && !photo) {
+      setChatError('No se encontró la foto seleccionada en la bóveda.')
+      return
+    }
+    const userMessage = {
+      role: 'user',
+      content: text.trim(),
+      ...(photo ? { attachment: { id: photo.id, name: photo.name } } : {}),
+    }
+    const updated = {
+      ...current,
+      title: current.messages.length ? current.title : text.trim().slice(0, 52),
+      messages: [...current.messages, userMessage],
+      updatedAt: new Date().toISOString(),
+    }
+    setVaultConversations(items => items.map(item => item.id === updated.id ? updated : item))
+    setChatSending(true)
+    setChatError('')
+    try {
+      await persistVaultConversation(updated)
+      const image = photo ? { dataUrl: await encodeVaultPhotoForChat(photo, vaultKey) } : undefined
+      const { data, error: invokeError } = await supabase.functions.invoke('vault-ai-chat', {
+        body: { agent: updated.agent, messages: updated.messages.slice(-24), ...(image ? { image } : {}) },
+        headers: { 'x-vault-session': vaultSessionToken },
+      })
+      if (invokeError) {
+        let detail = ''
+        if (invokeError.context instanceof Response) {
+          const responseBody = await invokeError.context.clone().json().catch(() => null)
+          detail = responseBody?.error || ''
+        }
+        throw new Error(detail || invokeError.message)
       }
-      return;
+      if (!data?.reply) throw new Error('El agente no devolvió una respuesta.')
+      const completed = {
+        ...updated,
+        messages: [...updated.messages, { role: 'assistant', content: data.reply }],
+        updatedAt: new Date().toISOString(),
+      }
+      await persistVaultConversation(completed)
+      setVaultConversations(items => items.map(item => item.id === completed.id ? completed : item))
+    } catch (sendError) {
+      setChatError(sendError.message || 'No se pudo contactar con el agente.')
+    } finally {
+      setChatSending(false)
     }
-
-    if (!confirm(`¿Borrar carpeta ${name}?`)) return
-    const { error } = await supabase.from('folders').delete().eq('id', id)
-    if (!error) fetchFolders()
   }
 
-  const handleLogout = async () => {
-    if (isDecoyMode) {
-      // Limpiar datos temporales
-      setDecoyFiles([]);
-      setDecoyFolders([]);
-      setIsDecoyMode(false);
-      setMasterPassword('');
-      setSession(null);
-      setUser(null);
-      await supabase.auth.signOut();
-      return;
-    }
+  async function deleteVaultConversation(conversationId) {
+    const { error: deleteError } = await supabase.from('vault_conversations').delete().eq('id', conversationId)
+    if (deleteError) return setChatError(deleteError.message)
+    const remaining = vaultConversations.filter(item => item.id !== conversationId)
+    setVaultConversations(remaining)
+    if (selectedConversationId === conversationId) setSelectedConversationId(remaining[0]?.id || null)
+  }
 
-    if (confirm('¿Deseas borrar también el caché local persistente por seguridad? (Si no, las fotos cargarán más rápido la próxima vez)')) {
-      await clearVaultCache();
-    }
-    // Limpiar caché de sesión
-    Object.values(mediaCache).forEach(url => URL.revokeObjectURL(url));
-    Object.keys(mediaCache).forEach(key => delete mediaCache[key]);
+  async function handleLogout() {
+    clearVaultState()
     await supabase.auth.signOut()
   }
 
-  if (loading && !user) return <div className="loading">Accediendo a la bóveda...</div>
-  if (!user) return <Login onLogin={setUser} />
+  if (authLoading) return <div className="boot-screen"><span className="boot-mark">T</span><p>Preparando tu espacio</p></div>
+  if (!supabase) return <div className="config-error"><ShieldCheck size={30} /><h1>Configura el acceso</h1><p>Faltan los datos de conexión del espacio. Revisa la configuración local de Supabase.</p></div>
+  if (!session) return <Login />
+
+  const today = new Date().toISOString().slice(0, 10)
+  const visibleTasks = tasks.filter(task => {
+    const matchesText = `${task.title} ${task.category}`.toLowerCase().includes(query.toLowerCase())
+    const matchesCategory = categoryFilter === 'Todas' || task.category === categoryFilter
+    const matchesFilter = filter === 'Todas' || (filter === 'Hoy' && (!task.due_date || task.due_date <= today) && !task.completed) || (filter === 'Próximas' && task.due_date > today && !task.completed) || (filter === 'Completadas' && task.completed)
+    return matchesText && matchesCategory && matchesFilter
+  })
+  const pendingCount = tasks.filter(task => !task.completed).length
+
+  if (view === 'vault' && vaultUnlocked && !showVaultGate) {
+    return <VaultGallery
+      items={visibleVaultObjects}
+      photos={vaultObjects.filter(item => item.type?.startsWith('image/'))}
+      categories={vaultCategories}
+      vaultKey={vaultKey}
+      secret={unlockSecret}
+      busy={busy}
+      error={error}
+      previewItem={previewItem}
+      previewUrl={previewUrl}
+      zoom={previewZoom}
+      onZoom={setPreviewZoom}
+      onOpen={openVaultPreview}
+      onUpload={addVaultFiles}
+      onUpdate={updateVaultMetadata}
+      onDownload={downloadVaultObject}
+      onDelete={removeVaultObject}
+      onClosePreview={() => { setPreviewItem(null); setPreviewUrl(null) }}
+      onWriteNfc={async () => {
+        try {
+          await writeNfcSecret(unlockSecret)
+          setError('Clave escrita en NFC. Protégela físicamente; una etiqueta NFC puede copiarse.')
+        } catch (nfcError) {
+          setError(nfcError.message)
+        }
+      }}
+      onLock={() => {
+        setVaultKey(null)
+        setVaultSessionToken('')
+        setVaultUnlocked(false)
+        setUnlockSecret('')
+        setVaultObjects([])
+        setVaultConversations([])
+        setSelectedConversationId(null)
+        setChatOpen(false)
+        setPreviewItem(null)
+        setPreviewUrl(null)
+        setView('tasks')
+      }}
+      onLogout={handleLogout}
+      search={vaultSearch}
+      onSearch={setVaultSearch}
+      category={vaultCategoryFilter}
+      onCategory={setVaultCategoryFilter}
+      favoritesOnly={vaultFavoritesOnly}
+      onFavoritesOnly={setVaultFavoritesOnly}
+      onClearError={() => setError('')}
+      conversations={vaultConversations}
+      selectedConversationId={selectedConversationId}
+      chatOpen={chatOpen}
+      chatSending={chatSending}
+      chatError={chatError}
+      onOpenChat={() => { setChatOpen(true); setChatError('') }}
+      onCloseChat={() => setChatOpen(false)}
+      onCreateChat={createVaultConversation}
+      onSelectChat={setSelectedConversationId}
+      onDeleteChat={deleteVaultConversation}
+      onSendChat={sendVaultMessage}
+      onClearChatError={() => setChatError('')}
+    />
+  }
 
   return (
-    <div className="app-container">
-      {/* Mobile Toggle */}
-      <button
-        className="mobile-nav-toggle glass"
-        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-        style={{ border: 'none', color: 'white', cursor: 'pointer' }}
-      >
-        {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
-      </button>
-
-      {/* Sidebar Overlay for Mobile */}
-      {isSidebarOpen && <div className="sidebar-overlay" onClick={() => setIsSidebarOpen(false)}></div>}
-
-      <aside className={`sidebar glass ${isSidebarOpen ? 'open' : ''}`}>
-        <div style={{ padding: '0 10px', marginBottom: '20px' }}>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Vault.</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.6rem', color: isDecoyMode ? '#60a5fa' : (masterPassword ? '#4ade80' : '#ff4444') }}>
-            <Tag size={10} /> {isDecoyMode ? 'Bóveda de Señuelo Activa' : (masterPassword ? 'Bóveda Desbloqueada' : 'Bóveda Bloqueada')}
-          </div>
-        </div>
-
-        <nav style={{ flex: 1, overflowY: 'auto' }}>
-          <div style={{ color: 'var(--text-dim)', fontSize: '0.75rem', fontWeight: 600, padding: '0 16px 8px', textTransform: 'uppercase' }}>Secciones</div>
-          {folders.map(cat => (
-            <div key={cat.id} className={`category-item ${activeTab === cat.name ? 'active' : ''}`} onClick={() => { setActiveTab(cat.name); setIsSidebarOpen(false); }} style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <Folder size={18} />
-                <span style={{ textTransform: 'capitalize' }}>{cat.name}</span>
-              </div>
-              <LogOut size={14} style={{ opacity: 0.3, cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); deleteFolder(cat.id, cat.name); }} />
-            </div>
-          ))}
-          <div className="category-item" onClick={() => setShowNewFolderModal(true)} style={{ border: '1px dashed var(--glass-border)', marginTop: '20px', justifyContent: 'center' }}>
-            <span>+ Nueva Carpeta</span>
-          </div>
-          
-          <div className="category-item" onClick={() => setShowSettingsModal(true)} style={{ border: '1px dashed var(--glass-border)', marginTop: '10px', justifyContent: 'center', background: 'rgba(96, 165, 250, 0.05)' }}>
-            <Settings size={18} style={{ color: '#60a5fa' }} />
-            <span style={{ color: '#60a5fa' }}>Configurar Señuelo</span>
-          </div>
+    <div className="workspace">
+      <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
+        <div className="brand"><span className="brand-mark">T</span><span>tarea<span className="brand-dot">.</span></span><button className="icon-button mobile-close" title="Cerrar menú" onClick={() => setMobileNav(false)}><X size={18} /></button></div>
+        <div className="workspace-label">MI ESPACIO</div>
+        <nav className="primary-nav" aria-label="Navegación principal">
+          <button className={`nav-item ${view === 'tasks' ? 'selected' : ''}`} onClick={() => { setView('tasks'); setShowVaultGate(false); setMobileNav(false) }}><ListTodo size={18} /><span>Mis tareas</span><span className="nav-count">{pendingCount}</span></button>
         </nav>
-
-        {showNewFolderModal && (
-          <form onSubmit={createFolder} className="glass" style={{ padding: '15px', display: 'flex', gap: '8px' }}>
-            <input autoFocus className="glass" style={{ flex: 1, padding: '8px', border: 'none', color: 'white' }} placeholder="Nombre..." value={newFolderName} onChange={e => setNewFolderName(e.target.value)} />
-            <button className="glow-btn" style={{ padding: '8px' }}>OK</button>
-          </form>
-        )}
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <label className="glow-btn" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', cursor: 'pointer', opacity: uploading ? 0.7 : 1 }}>
-            <Upload size={18} /> {uploading ? 'Encriptando...' : 'Subir a Drive'}
-            <input type="file" onChange={handleUpload} style={{ display: 'none' }} disabled={uploading} multiple />
-          </label>
-          <div className="category-item" onClick={handleLogout} style={{ cursor: 'pointer' }}>
-            <LogOut size={18} /> Cerrar Bóveda
-          </div>
+        <div className="side-divider" />
+        <div className="workspace-label categories-label">CATEGORÍAS <button className="mini-add" title="Añadir categoría" onClick={() => { const name = window.prompt('Nombre de categoría'); if (name?.trim()) { setCustomCategories(current => [...new Set([...current, name.trim()])]); setTaskCategory(name.trim()) } }}><Plus size={14} /></button></div>
+        <nav className="category-nav" aria-label="Categorías">
+          <button className={`category-link ${categoryFilter === 'Todas' ? 'active' : ''}`} onClick={() => setCategoryFilter('Todas')}><span className="category-dot all-dot" />Todas</button>
+          {categories.map((category, index) => <button key={category} className={`category-link ${categoryFilter === category ? 'active' : ''}`} onClick={() => setCategoryFilter(category)}><span className={`category-dot category-${index % 4}`} />{category}</button>)}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="account-chip"><span className="avatar">{user.email?.slice(0, 1).toUpperCase()}</span><div className="account-copy"><strong>{user.email?.split('@')[0]}</strong><span>{user.email}</span></div><button className="icon-button" title="Cerrar sesión" onClick={handleLogout}><LogOut size={16} /></button></div>
         </div>
       </aside>
+      {mobileNav && <button className="nav-scrim" aria-label="Cerrar menú" onClick={() => setMobileNav(false)} />}
 
-      <main className="main-content">
-        <header style={{ marginBottom: '32px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
-          <h2 style={{ fontSize: '2rem', fontWeight: 700, textTransform: 'capitalize' }}>{activeTab}</h2>
-          <div className="glass" style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', gap: '8px' }}>
-            <input type="text" placeholder="Buscar en la bóveda..." className="glass" style={{ background: 'transparent', border: 'none', color: 'white', outline: 'none' }} value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
-          </div>
+      <main className="main-panel">
+        <header className="topbar">
+          <button className="icon-button mobile-menu" title="Abrir menú" onClick={() => setMobileNav(true)}><Menu size={20} /></button>
+          <div className="breadcrumb"><span>Mi espacio</span><span className="crumb-slash">/</span><strong>{view === 'vault' && vaultUnlocked ? 'Archivo privado' : 'Mis tareas'}</strong></div>
+          <div className="topbar-right"><span className="today-label"><CalendarDays size={15} />{new Intl.DateTimeFormat('es', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())}</span><button className="avatar top-avatar" title={user.email}>{user.email?.slice(0, 1).toUpperCase()}</button></div>
         </header>
 
-        <div className="media-grid">
-          {loading && <div style={{ gridColumn: '1/-1', textAlign: 'center' }}>Abriendo archivos...</div>}
-          {!loading && files.length === 0 ? (
-            <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '100px', color: 'var(--text-dim)' }}>La bóveda está vacía</div>
-          ) : (
-            files.map(file => (
-              <MediaItem
-                key={file.id}
-                file={file}
-                session={session}
-                masterPassword={masterPassword}
-                onEdit={editFileName}
-                onDelete={deleteFile}
-                onSelect={setSelectedFile}
-              />
-            ))
-          )}
-        </div>
+        {(error || busy) && <div className={`notice ${error ? 'notice-error' : ''}`}>{error || 'Guardando…'}{error && <button className="icon-button" title="Cerrar aviso" onClick={() => setError('')}><X size={16} /></button>}</div>}
+
+        {showVaultGate && <VaultGate config={vaultConfig} busy={busy} setupSecret={setupSecret} setSetupSecret={setSetupSecret} unlockSecret={unlockSecret} setUnlockSecret={setUnlockSecret} onSubmit={handleUnlockSubmit} onFile={unlockFromFile} onNfc={unlockFromNfc} onGenerate={() => setSetupSecret(generateUnlockSecret())} onExport={() => saveKeyFile(setupSecret || unlockSecret)} onWriteNfc={async () => { try { await writeNfcSecret(setupSecret || unlockSecret); setError('Clave escrita en NFC. Protégela físicamente; una etiqueta NFC puede copiarse.') } catch (nfcError) { setError(nfcError.message) } }} onContinue={() => { setShowVaultGate(false); setView('tasks') }} />}
+
+        {!showVaultGate && view === 'tasks' && <section className="page-content">
+          <div className="page-heading"><div><div className="eyebrow">TU DÍA, CON ORDEN</div><h1>Mis tareas<span className="heading-period">.</span></h1><p>Un paso a la vez. Lo importante, a la vista.</p></div><div className="heading-stat"><strong>{pendingCount.toString().padStart(2, '0')}</strong><span>pendientes</span></div></div>
+          <form className="task-composer" onSubmit={addTask}><span className="composer-plus"><Plus size={18} /></span><input aria-label="Nueva tarea" value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="¿Qué necesitas hacer?" required /><select aria-label="Categoría" value={taskCategory} onChange={event => setTaskCategory(event.target.value)}>{categories.map(category => <option key={category}>{category}</option>)}</select><input aria-label="Fecha" type="date" value={taskDate} onChange={event => setTaskDate(event.target.value)} /><select aria-label="Prioridad" value={taskPriority} onChange={event => setTaskPriority(event.target.value)}><option>Normal</option><option>Alta</option><option>Baja</option></select><button className="add-task-button" type="submit" disabled={busy}><Plus size={16} /><span>Añadir</span></button></form>
+          <div className="task-toolbar"><div className="filter-tabs">{['Hoy', 'Próximas', 'Todas', 'Completadas'].map(item => <button key={item} className={filter === item ? 'active' : ''} onClick={() => setFilter(item)}>{item}{item === 'Hoy' && <span className="tab-count">{pendingCount}</span>}</button>)}</div><label className="search-box"><Search size={16} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar tareas" /></label></div>
+          <div className="task-list">{visibleTasks.length ? visibleTasks.map(task => <article className={`task-row ${task.completed ? 'task-complete' : ''}`} key={task.id}><button className={`task-check ${task.completed ? 'checked' : ''}`} aria-label={task.completed ? 'Marcar pendiente' : 'Completar tarea'} onClick={() => toggleTask(task)}>{task.completed && <Check size={14} />}</button><div className="task-copy"><strong>{task.title}</strong><div className="task-meta"><span className="task-category"><span className="category-dot category-0" />{task.category}</span>{task.due_date && <span className={task.due_date < today && !task.completed ? 'overdue' : ''}><CalendarDays size={13} />{new Intl.DateTimeFormat('es', { day: 'numeric', month: 'short' }).format(new Date(`${task.due_date}T12:00:00`))}</span>}</div></div><span className={`priority priority-${task.priority?.toLowerCase()}`}>{task.priority}</span><button className="icon-button task-delete" title="Eliminar tarea" onClick={() => removeTask(task.id)}><Trash2 size={16} /></button></article>) : <div className="empty-tasks"><CheckCheck size={26} /><h3>{query ? 'Sin coincidencias' : 'Todo en orden'}</h3><p>{query ? 'Prueba con otro término.' : 'No hay tareas en esta vista. Añade una y empieza por ahí.'}</p></div>}</div>
+          <footer className="list-footer">Mostrando {visibleTasks.length} de {tasks.length} tareas <span>Guardado en tu espacio</span></footer>
+        </section>}
+
+        {!showVaultGate && view === 'vault' && vaultUnlocked && <section className="page-content vault-content"><div className="page-heading"><div><div className="eyebrow vault-eyebrow"><ShieldCheck size={14} /> CIFRADO EN ESTE DISPOSITIVO</div><h1>Archivo privado<span className="heading-period">.</span></h1><p>Los archivos y sus nombres se cifran antes de subirlos.</p></div><div className="vault-actions"><button className="secondary-button" onClick={() => saveKeyFile(unlockSecret)}><FileKey2 size={16} /> Exportar .csdk</button><button className="secondary-button" onClick={async () => { try { await writeNfcSecret(unlockSecret); setError('Clave escrita en NFC. La etiqueta puede copiarse: guárdala en un lugar seguro.') } catch (nfcError) { setError(nfcError.message) } }}><Tag size={16} /> Grabar NFC</button><button className="secondary-button lock-button" onClick={() => { setVaultKey(null); setVaultUnlocked(false); setUnlockSecret(''); setVaultObjects([]); setView('tasks') }}><KeyRound size={16} /> Bloquear</button></div></div><label className="upload-zone"><Upload size={19} /><span><strong>{busy ? 'Cifrando y subiendo…' : 'Añadir archivos cifrados'}</strong><small>El contenido se cifra localmente antes de salir del dispositivo</small></span><input type="file" multiple onChange={addVaultFiles} disabled={busy} /></label><div className="vault-file-list">{vaultObjects.length ? vaultObjects.map(item => <article className="vault-file-row" key={item.id}><div className="file-type-icon"><Archive size={17} /></div><div className="vault-file-copy"><strong>{item.name}</strong><span>{item.category} · {(item.size / 1024 / 1024).toFixed(2)} MB</span></div><button className={`icon-button ${item.favorite ? 'favorite-active' : ''}`} title={item.favorite ? 'Quitar favorito' : 'Añadir a favoritos'} onClick={() => updateVaultMetadata(item, { favorite: !item.favorite })}><Star size={17} fill={item.favorite ? 'currentColor' : 'none'} /></button><button className="icon-button" title="Renombrar" onClick={() => { const name = window.prompt('Nuevo nombre', item.name); if (name?.trim()) updateVaultMetadata(item, { name: name.trim() }) }}><FilePlus2 size={17} /></button><button className="icon-button" title="Cambiar categoría" onClick={() => { const category = window.prompt('Categoría', item.category); if (category?.trim()) updateVaultMetadata(item, { category: category.trim() }) }}><Tag size={17} /></button><button className="icon-button" title="Descargar y descifrar" onClick={() => downloadVaultObject(item)}><Upload className="download-icon" size={17} /></button><button className="icon-button danger-icon" title="Eliminar archivo" onClick={() => removeVaultObject(item)}><Trash2 size={17} /></button></article>) : <div className="empty-vault"><Archive size={25} /><h3>Tu archivo privado está vacío</h3><p>Sube un archivo para cifrarlo en este dispositivo.</p></div>}</div><div className="vault-note"><CircleHelp size={15} /><span>La clave no se puede recuperar desde el servidor. Conserva una copia segura del archivo .csdk o configura tu etiqueta NFC.</span></div></section>}
       </main>
-
-      {/* Lightbox Modal */}
-      {selectedFile && (
-        <div className="lightbox-overlay" onClick={() => setSelectedFile(null)} style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.9)', zIndex: 1000,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          backdropFilter: 'blur(10px)', padding: '20px'
-        }}>
-          <div className="lightbox-content" onClick={e => e.stopPropagation()} style={{
-            position: 'relative', width: 'auto', maxWidth: '95vw', maxHeight: '95vh',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center'
-          }}>
-            <button onClick={() => setSelectedFile(null)} style={{
-              position: 'absolute', top: '-45px', right: '0',
-              background: 'white', border: 'none', color: 'black',
-              cursor: 'pointer', borderRadius: '50%', width: '32px', height: '32px',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold'
-            }}>✕</button>
-
-            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {selectedFile.type === 'video' ? (
-                <EnhancedVideoPlayer src={selectedFile.url} />
-              ) : (
-                <img src={selectedFile.url} alt={selectedFile.name} style={{
-                  maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain', borderRadius: '8px',
-                  boxShadow: '0 0 50px rgba(0,0,0,0.8)'
-                }} />
-              )}
-            </div>
-
-            <div style={{ marginTop: '15px', color: 'white', textAlign: 'center' }}>
-              <h3 style={{ margin: 0 }}>{selectedFile.name}</h3>
-              <p style={{ opacity: 0.6, fontSize: '0.8rem' }}>{selectedFile.type === 'video' ? 'Video Encriptado' : 'Imagen Encriptada'}</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Settings Modal (Configurar Clave de Coacción) */}
-      {showSettingsModal && (
-        <div className="lightbox-overlay" onClick={() => setShowSettingsModal(false)} style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.85)', zIndex: 1000,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          backdropFilter: 'blur(10px)', padding: '20px'
-        }}>
-          <div className="lightbox-content glass" onClick={e => e.stopPropagation()} style={{
-            position: 'relative', width: '100%', maxWidth: '420px', padding: '30px',
-            display: 'flex', flexDirection: 'column', gap: '20px', borderRadius: '12px',
-            border: '1px solid var(--glass-border)', boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.3)'
-          }}>
-            <h3 style={{ fontSize: '1.4rem', fontWeight: 700, margin: 0, color: 'white' }}>Clave de Coacción</h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', lineHeight: '1.5' }}>
-              Define una clave alternativa de señuelo. Si ingresas esta clave al abrir la bóveda frente a terceros, la aplicación fingirá abrirse con normalidad, pero solo mostrará fotos de paisajes e inofensivas en lugar de tus archivos reales.
-            </p>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <label style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontWeight: 600 }}>Nueva Clave de Señuelo:</label>
-              <input 
-                type="password" 
-                className="glass" 
-                placeholder="Ej. clavefalsa123" 
-                style={{ width: '100%', padding: '10px 12px', border: '1px solid var(--glass-border)', outline: 'none', color: 'white', borderRadius: '6px' }}
-                value={decoyPasswordInput}
-                onChange={e => setDecoyPasswordInput(e.target.value)}
-              />
-            </div>
-
-            <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
-              <button className="glow-btn" style={{ flex: 1, padding: '10px', fontSize: '0.9rem', cursor: 'pointer' }} onClick={async () => {
-                if (!decoyPasswordInput.trim()) {
-                  alert('Por favor, introduce una clave válida');
-                  return;
-                }
-                const hash = await hashPassword(decoyPasswordInput);
-                localStorage.setItem('vault_decoy_hash', hash);
-                alert('¡Clave de Coacción establecida con éxito! Pruébala la próxima vez que inicies sesión.');
-                setDecoyPasswordInput('');
-                setShowSettingsModal(false);
-              }}>Guardar Clave</button>
-              
-              <button className="glow-btn" style={{ flex: 1, padding: '10px', background: 'transparent', border: '1px solid #ef4444', color: '#ef4444', fontSize: '0.9rem', cursor: 'pointer' }} onClick={() => {
-                localStorage.removeItem('vault_decoy_hash');
-                alert('Clave de Coacción eliminada.');
-                setShowSettingsModal(false);
-              }}>Desactivar</button>
-            </div>
-            
-            <button onClick={() => setShowSettingsModal(false)} style={{
-              position: 'absolute', top: '15px', right: '15px',
-              background: 'none', border: 'none', color: 'white',
-              cursor: 'pointer', fontSize: '1.2rem', outline: 'none'
-            }}>✕</button>
-          </div>
-        </div>
-      )}
     </div>
   )
+}
+
+function VaultGate({ config, busy, setupSecret, setSetupSecret, unlockSecret, setUnlockSecret, onSubmit, onFile, onNfc, onGenerate, onExport, onWriteNfc, onContinue }) {
+  const [mode, setMode] = useState('password')
+  const value = config ? unlockSecret : setupSecret
+  const setValue = config ? setUnlockSecret : setSetupSecret
+  return <div className="gate-backdrop"><section className="vault-gate"><div className="gate-icon"><KeyRound size={22} /></div><div className="eyebrow">{config ? 'ACCESO CIFRADO' : 'CONFIGURACIÓN INICIAL'}</div><h2>{config ? 'Desbloquea tu archivo' : 'Crea tu archivo privado'}</h2><p>{config ? 'La clave se verifica en servidor; los archivos se descifran en este dispositivo.' : 'Elige una clave de alta entropía. Solo se guarda un verificador protegido, nunca la clave.'}</p><div className="credential-tabs"><button className={mode === 'password' ? 'selected' : ''} onClick={() => setMode('password')}><KeyRound size={15} />Clave</button><button className={mode === 'file' ? 'selected' : ''} onClick={() => setMode('file')}><FileKey2 size={15} />.csdk</button><button className={mode === 'nfc' ? 'selected' : ''} onClick={() => setMode('nfc')}><Tag size={15} />NFC</button></div>{mode === 'password' ? <form onSubmit={onSubmit} className="gate-form">{!config && <button type="button" className="generate-key" onClick={onGenerate}><FileKey2 size={15} />Generar clave aleatoria</button>}<input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} placeholder={config ? 'Clave de bóveda' : 'Mínimo 16 caracteres'} minLength={16} required /><button className="unlock-button" disabled={busy}>{config ? 'Desbloquear' : 'Crear bóveda'}<ChevronDown size={16} /></button></form> : mode === 'file' ? <div className="credential-action"><label className="secondary-button"><FileKey2 size={16} />Seleccionar archivo .csdk<input type="file" accept=".csdk,application/vnd.csdk+json,application/json" onChange={onFile} /></label><small>El archivo contiene la clave secreta; guárdalo protegido.</small></div> : <div className="credential-action"><button className="secondary-button" onClick={onNfc} disabled={busy}><Tag size={16} />Leer etiqueta NFC</button><small>Requiere HTTPS y un navegador compatible, normalmente Chrome en Android.</small></div>}{!config && value.length >= 16 && <div className="setup-key-actions"><button className="text-action" onClick={onExport}><FileKey2 size={14} />Descargar .csdk</button><button className="text-action" onClick={onWriteNfc}><Tag size={14} />Grabar NFC</button></div>}<button className="continue-tasks" onClick={onContinue}>Continuar a mis tareas</button><div className="gate-warning"><CircleHelp size={14} /><span>Una etiqueta NFC normal puede copiarse. Úsala como acceso alternativo, no como único factor.</span></div></section></div>
 }
 
 export default App
